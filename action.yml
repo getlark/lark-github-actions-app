@@ -4,7 +4,7 @@ author: getlark
 
 inputs:
   anthropic-api-key:
-    description: Anthropic API key used by claude-code-action to draft test proposals. Pass via `${{ secrets.ANTHROPIC_API_KEY }}` so GitHub masks it in logs.
+    description: Anthropic API key used by claude-code-action to draft test proposals. Pass via secrets.ANTHROPIC_API_KEY so GitHub masks it in logs.
     required: true
   lark-api-base-url:
     description: Base URL for the Lark API. Override to point at staging; production customers should leave the default.
