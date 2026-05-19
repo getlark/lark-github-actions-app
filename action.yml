@@ -40,6 +40,19 @@ runs:
         fi
         echo "skip=false" >> "$GITHUB_OUTPUT"
 
+    - name: Ensure Lark labels exist
+      if: steps.check-anthropic-key.outputs.skip != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+      run: |
+        # --force makes `gh label create` idempotent: creates the label if
+        # missing, updates color/description if it already exists.
+        gh label create "lark:proposing-tests"      --repo "$REPO" --color "FBCA04" --description "Lark is drafting test proposals for this PR"   --force
+        gh label create "lark:tests-proposed"       --repo "$REPO" --color "0E8A16" --description "Lark has proposed end-to-end tests for this PR" --force
+        gh label create "lark:test-proposal-failed" --repo "$REPO" --color "B60205" --description "Lark failed to propose tests for this PR"       --force
+
     - name: Mark PR as in-progress
       if: steps.check-anthropic-key.outputs.skip != 'true'
       shell: bash
