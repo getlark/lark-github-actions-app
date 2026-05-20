@@ -178,8 +178,8 @@ runs:
           --remove-label "$LARK_PROPOSED_LABEL,$LARK_FAILED_LABEL" \
           --add-label "$LARK_PROPOSING_LABEL" || true
 
-    - name: Checkout PR head
-      if: steps.proceed.outputs.go == 'true' && steps.pr.outputs.mode == 'propose' && steps.check-anthropic-key.outputs.skip != 'true'
+    - name: Checkout repo
+      if: steps.proceed.outputs.go == 'true' && steps.check-anthropic-key.outputs.skip != 'true'
       uses: actions/checkout@v5
       with:
         fetch-depth: 0
