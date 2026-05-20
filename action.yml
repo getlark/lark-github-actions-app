@@ -1,5 +1,5 @@
-name: Lark — propose tests
-description: Propose end-to-end Lark tests for each pull request diff.
+name: Lark — propose and create tests
+description: Propose end-to-end Lark tests for each pull request diff, and create them on demand when a maintainer comments `/create-workflows`.
 author: getlark
 
 inputs:
@@ -23,25 +23,132 @@ runs:
           echo "::add-mask::$ANTHROPIC_API_KEY"
         fi
 
+    - name: Resolve event mode
+      id: pr
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        PR_FROM_PR: ${{ github.event.pull_request.number }}
+        PR_FROM_ISSUE: ${{ github.event.issue.number }}
+        ISSUE_IS_PR: ${{ github.event.issue.pull_request != null }}
+      run: |
+        # Map the triggering event to one of: propose, create, skip.
+        # `propose` runs on PR open/reopen; `create` runs on a PR comment
+        # (issue_comment with a pull_request payload). Everything else is
+        # a no-op so the action is safe to wire to broader triggers.
+        if [ "$EVENT_NAME" = "pull_request" ]; then
+          echo "number=$PR_FROM_PR" >> "$GITHUB_OUTPUT"
+          echo "mode=propose" >> "$GITHUB_OUTPUT"
+        elif [ "$EVENT_NAME" = "issue_comment" ] && [ "$ISSUE_IS_PR" = "true" ]; then
+          echo "number=$PR_FROM_ISSUE" >> "$GITHUB_OUTPUT"
+          echo "mode=create" >> "$GITHUB_OUTPUT"
+        else
+          echo "mode=skip" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Parse /create-workflows command
+      id: parse
+      if: steps.pr.outputs.mode == 'create'
+      shell: bash
+      env:
+        COMMENT_BODY: ${{ github.event.comment.body }}
+      run: |
+        # The first non-blank line of the comment must start with
+        # `/create-workflows`. Optional trailing tokens are 1-based
+        # proposal indices, e.g. `/create-workflows 1 3`. Anything else
+        # makes this a no-op so the action ignores unrelated comments.
+        first_line=$(printf '%s' "$COMMENT_BODY" | awk 'NF{print; exit}')
+        if ! printf '%s' "$first_line" | grep -Eq '^/create-workflows([[:space:]]|$)'; then
+          echo "should-run=false" >> "$GITHUB_OUTPUT"
+          echo "selection=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        selection=$(printf '%s' "$first_line" | sed -E 's@^/create-workflows[[:space:]]*@@')
+        # Validate any tokens are positive integers; reject otherwise so we
+        # don't silently drop a typo'd index.
+        if [ -n "$selection" ]; then
+          for tok in $selection; do
+            if ! printf '%s' "$tok" | grep -Eq '^[1-9][0-9]*$'; then
+              echo "Invalid selection token: $tok"
+              echo "should-run=false" >> "$GITHUB_OUTPUT"
+              echo "selection=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+        fi
+        echo "should-run=true" >> "$GITHUB_OUTPUT"
+        echo "selection=$selection" >> "$GITHUB_OUTPUT"
+
+    - name: Authorize commenter
+      id: authorize
+      if: steps.pr.outputs.mode == 'create' && steps.parse.outputs.should-run == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        COMMENTER: ${{ github.event.comment.user.login }}
+        COMMENT_ID: ${{ github.event.comment.id }}
+      run: |
+        permission=$(gh api "repos/$REPO/collaborators/$COMMENTER/permission" --jq .permission 2>/dev/null || echo "none")
+        case "$permission" in
+          admin|maintain|write)
+            echo "authorized=true" >> "$GITHUB_OUTPUT"
+            ;;
+          *)
+            echo "Commenter $COMMENTER has '$permission' permission — refusing to create workflows."
+            gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+              -H "Accept: application/vnd.github+json" \
+              -f content=-1 >/dev/null || true
+            echo "authorized=false" >> "$GITHUB_OUTPUT"
+            ;;
+        esac
+
+    - name: Compute proceed flag
+      id: proceed
+      shell: bash
+      env:
+        MODE: ${{ steps.pr.outputs.mode }}
+        SHOULD_RUN: ${{ steps.parse.outputs.should-run }}
+        AUTHORIZED: ${{ steps.authorize.outputs.authorized }}
+      run: |
+        # Single boolean the rest of the action gates on. Keeps the per-step
+        # `if:` expressions short and avoids drifting conditions when new
+        # gating reasons get added later.
+        if [ "$MODE" = "propose" ]; then
+          echo "go=true" >> "$GITHUB_OUTPUT"
+        elif [ "$MODE" = "create" ] && [ "$SHOULD_RUN" = "true" ] && [ "$AUTHORIZED" = "true" ]; then
+          echo "go=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "go=false" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Check ANTHROPIC_API_KEY is configured
       id: check-anthropic-key
+      if: steps.proceed.outputs.go == 'true'
       shell: bash
       env:
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
         GH_TOKEN: ${{ github.token }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_NUMBER: ${{ steps.pr.outputs.number }}
         REPO: ${{ github.repository }}
-        LARK_PROPOSING_LABEL: lark:proposing-tests
+        MODE: ${{ steps.pr.outputs.mode }}
+        COMMENT_ID: ${{ github.event.comment.id }}
       run: |
         if [ -z "$ANTHROPIC_API_KEY" ]; then
-          gh pr comment "$PR_NUMBER" --repo "$REPO" --body $'**Lark setup needed**\n\nThis repo has the Lark test-proposal workflow installed, but the `ANTHROPIC_API_KEY` repo secret is not set. Add it under **Settings → Secrets and variables → Actions** to enable test proposals on future PRs.\n\nThis run was a no-op.'
+          if [ "$MODE" = "propose" ]; then
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body $'**Lark setup needed**\n\nThis repo has the Lark test-proposal workflow installed, but the `ANTHROPIC_API_KEY` repo secret is not set. Add it under **Settings → Secrets and variables → Actions** to enable test proposals on future PRs.\n\nThis run was a no-op.'
+          elif [ "$MODE" = "create" ] && [ -n "$COMMENT_ID" ]; then
+            gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+              -H "Accept: application/vnd.github+json" \
+              -f content=-1 >/dev/null || true
+          fi
           echo "skip=true" >> "$GITHUB_OUTPUT"
           exit 0
         fi
         echo "skip=false" >> "$GITHUB_OUTPUT"
 
     - name: Ensure Lark labels exist
-      if: steps.check-anthropic-key.outputs.skip != 'true'
+      if: steps.proceed.outputs.go == 'true' && steps.pr.outputs.mode == 'propose' && steps.check-anthropic-key.outputs.skip != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -54,11 +161,11 @@ runs:
         gh label create "lark:test-proposal-failed" --repo "$REPO" --color "B60205" --description "Lark failed to propose tests for this PR"       --force
 
     - name: Mark PR as in-progress
-      if: steps.check-anthropic-key.outputs.skip != 'true'
+      if: steps.proceed.outputs.go == 'true' && steps.pr.outputs.mode == 'propose' && steps.check-anthropic-key.outputs.skip != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_NUMBER: ${{ steps.pr.outputs.number }}
         REPO: ${{ github.repository }}
         LARK_PROPOSING_LABEL: lark:proposing-tests
         LARK_PROPOSED_LABEL: lark:tests-proposed
@@ -72,13 +179,77 @@ runs:
           --add-label "$LARK_PROPOSING_LABEL" || true
 
     - name: Checkout PR head
-      if: steps.check-anthropic-key.outputs.skip != 'true'
+      if: steps.proceed.outputs.go == 'true' && steps.pr.outputs.mode == 'propose' && steps.check-anthropic-key.outputs.skip != 'true'
       uses: actions/checkout@v5
       with:
         fetch-depth: 0
 
+    - name: Fetch latest proposals marker
+      id: proposals
+      if: steps.proceed.outputs.go == 'true' && steps.pr.outputs.mode == 'create' && steps.check-anthropic-key.outputs.skip != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ steps.pr.outputs.number }}
+        SELECTION: ${{ steps.parse.outputs.selection }}
+        COMMENT_ID: ${{ github.event.comment.id }}
+      run: |
+        # Find the most recent PR comment authored by the GitHub Actions
+        # bot whose first line is the `<!-- lark-test-proposals: ... -->`
+        # marker. Walk from newest to oldest so re-runs pick up the most
+        # recent set of proposals.
+        marker_line=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+          --jq '[.[] | select(.user.login=="github-actions[bot]")
+                       | select((.body // "") | test("^<!-- lark-test-proposals: "))]
+                | last
+                | .body
+                | split("\n")[0]' || true)
+        if [ -z "$marker_line" ] || [ "$marker_line" = "null" ]; then
+          echo "No proposals marker comment found on PR #$PR_NUMBER."
+          gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+            -H "Accept: application/vnd.github+json" \
+            -f content=confused >/dev/null || true
+          echo "found=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        # Strip the `<!-- lark-test-proposals: ` prefix and ` -->` suffix.
+        json=$(printf '%s' "$marker_line" | sed -E 's@^<!-- lark-test-proposals: (.*) -->$@\1@')
+        if [ -z "$json" ] || ! printf '%s' "$json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+          echo "Proposals marker did not contain a valid JSON array."
+          gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+            -H "Accept: application/vnd.github+json" \
+            -f content=confused >/dev/null || true
+          echo "found=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        printf '%s' "$json" > proposals.json
+        if [ -n "$SELECTION" ]; then
+          # Filter by 1-based indices. Reject out-of-range selections so the
+          # user notices a typo instead of silently creating the wrong set.
+          total=$(jq 'length' proposals.json)
+          for idx in $SELECTION; do
+            if [ "$idx" -lt 1 ] || [ "$idx" -gt "$total" ]; then
+              echo "Selection index $idx is out of range (1..$total)."
+              gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+                -H "Accept: application/vnd.github+json" \
+                -f content=-1 >/dev/null || true
+              echo "found=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          # Convert 1-based selection list to a jq filter on 0-based indices.
+          indices=$(printf '%s\n' $SELECTION | awk '{print $1 - 1}' | jq -s '.')
+          jq --argjson idx "$indices" '[ .[ $idx[] ] ]' proposals.json > proposals.filtered.json
+          mv proposals.filtered.json proposals.json
+        fi
+        count=$(jq 'length' proposals.json)
+        echo "Selected $count proposal(s)."
+        echo "found=true" >> "$GITHUB_OUTPUT"
+        echo "count=$count" >> "$GITHUB_OUTPUT"
+
     - name: Mint OIDC token for Lark
-      if: steps.check-anthropic-key.outputs.skip != 'true'
+      if: steps.proceed.outputs.go == 'true' && steps.check-anthropic-key.outputs.skip != 'true' && (steps.pr.outputs.mode == 'propose' || steps.proposals.outputs.found == 'true')
       id: oidc
       uses: actions/github-script@v8
       with:
@@ -88,12 +259,12 @@ runs:
           core.setOutput('token', token);
 
     - name: Exchange OIDC token for Lark API token
-      if: steps.check-anthropic-key.outputs.skip != 'true'
+      if: steps.proceed.outputs.go == 'true' && steps.check-anthropic-key.outputs.skip != 'true' && (steps.pr.outputs.mode == 'propose' || steps.proposals.outputs.found == 'true')
       id: exchange
       shell: bash
       env:
         OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_NUMBER: ${{ steps.pr.outputs.number }}
         LARK_API_BASE_URL: ${{ inputs.lark-api-base-url }}
       run: |
         response=$(curl -sS -X POST "$LARK_API_BASE_URL/integrations/github/ci/exchange-oidc" \
@@ -108,7 +279,7 @@ runs:
         echo "lark_token=$lark_token" >> "$GITHUB_OUTPUT"
 
     - name: Install Lark skills for Claude Code
-      if: steps.check-anthropic-key.outputs.skip != 'true'
+      if: steps.proceed.outputs.go == 'true' && steps.check-anthropic-key.outputs.skip != 'true' && (steps.pr.outputs.mode == 'propose' || steps.proposals.outputs.found == 'true')
       shell: bash
       run: |
         npx -y skills@latest add getlark/skills \
@@ -117,7 +288,7 @@ runs:
           -y
 
     - name: Write Lark MCP config
-      if: steps.check-anthropic-key.outputs.skip != 'true'
+      if: steps.proceed.outputs.go == 'true' && steps.check-anthropic-key.outputs.skip != 'true' && (steps.pr.outputs.mode == 'propose' || steps.proposals.outputs.found == 'true')
       shell: bash
       env:
         LARK_TOKEN: ${{ steps.exchange.outputs.lark_token }}
@@ -135,8 +306,8 @@ runs:
           > "$MCP_CONFIG_PATH"
 
     - name: Run Claude Code to propose tests
-      id: claude
-      if: steps.check-anthropic-key.outputs.skip != 'true'
+      id: claude-propose
+      if: steps.proceed.outputs.go == 'true' && steps.pr.outputs.mode == 'propose' && steps.check-anthropic-key.outputs.skip != 'true'
       uses: anthropics/claude-code-action@v1
       with:
         anthropic_api_key: ${{ inputs.anthropic-api-key }}
@@ -190,12 +361,60 @@ runs:
           installation. If the PR only touches CI config and there is no
           customer-facing behavior to cover, return `[]`.
 
+    - name: Run Claude Code to create workflows
+      id: claude-create
+      if: steps.proceed.outputs.go == 'true' && steps.pr.outputs.mode == 'create' && steps.check-anthropic-key.outputs.skip != 'true' && steps.proposals.outputs.found == 'true'
+      uses: anthropics/claude-code-action@v1
+      with:
+        anthropic_api_key: ${{ inputs.anthropic-api-key }}
+        github_token: ${{ github.token }}
+        claude_args: |
+          --max-turns 60
+          --model sonnet
+          --permission-mode acceptEdits
+          --mcp-config ${{ runner.temp }}/lark-mcp.json
+          --allowedTools "mcp__lark__create_workflow,mcp__lark__list_workflow_groups,mcp__lark__list_secret_contexts,mcp__lark__get_secret_context"
+        show_full_output: ${{ runner.debug == '1' }}
+        prompt: |
+          You are running inside a GitHub Action to materialize Lark test
+          workflows from previously-proposed tests. A maintainer has
+          approved a subset of proposals via a PR comment.
+
+          Read `proposals.json` in the workspace root. It is a JSON array
+          of `{title, description, target, steps}` entries — exactly the
+          proposals the user asked to create. If the file is missing,
+          empty, or `[]`, write `[]` to `created.json` and exit
+          immediately. Do NOT invent or add proposals beyond what is in
+          the file.
+
+          For each proposal, call `mcp__lark__create_workflow` to create
+          the workflow on Lark. Follow the guidance in the `create-workflow`
+          skill at `.claude/skills/create-workflow/SKILL.md` for shaping
+          the request — but use the MCP tool, not the `getlark` CLI.
+
+          - Use the proposal's `title` as the workflow `name`.
+          - Build the workflow `description` by concatenating the proposal's
+            `target` and `steps` so the Lark generation pipeline has the
+            full target plus ordered actions.
+          - If a proposal looks like it needs a secret context or a group,
+            verify the name first with `mcp__lark__list_secret_contexts`
+            or `mcp__lark__list_workflow_groups`. If the named context or
+            group doesn't exist, omit the optional field rather than
+            failing the create call.
+
+          After all create calls finish, write `created.json` to the
+          workspace root: a JSON array of `{title, id, status, url}`
+          where `url` is `https://dashboard.getlark.ai/workflows/<id>`.
+          Include only successfully-created workflows. If a single
+          create call fails, continue with the rest and omit the
+          failed one from `created.json`.
+
     - name: Post proposals comment + swap labels
-      if: steps.check-anthropic-key.outputs.skip != 'true'
+      if: steps.proceed.outputs.go == 'true' && steps.pr.outputs.mode == 'propose' && steps.check-anthropic-key.outputs.skip != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_NUMBER: ${{ steps.pr.outputs.number }}
         REPO: ${{ github.repository }}
         LARK_PROPOSING_LABEL: lark:proposing-tests
         LARK_PROPOSED_LABEL: lark:tests-proposed
@@ -214,14 +433,44 @@ runs:
           gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$LARK_PROPOSING_LABEL" --add-label "$LARK_PROPOSED_LABEL" || true
         fi
 
-    - name: Mark failure on error
-      if: failure() && steps.check-anthropic-key.outputs.skip != 'true'
+    - name: Reply with created workflows
+      if: steps.proceed.outputs.go == 'true' && steps.pr.outputs.mode == 'create' && steps.check-anthropic-key.outputs.skip != 'true' && steps.proposals.outputs.found == 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_NUMBER: ${{ steps.pr.outputs.number }}
         REPO: ${{ github.repository }}
+        COMMENT_ID: ${{ github.event.comment.id }}
+      run: |
+        if [ ! -s created.json ] || ! jq -e 'type == "array" and length > 0' created.json >/dev/null 2>&1; then
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body $'Lark could not create any workflows from the selected proposals. Check the action logs for details.'
+          gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+            -H "Accept: application/vnd.github+json" \
+            -f content=-1 >/dev/null || true
+          exit 0
+        fi
+        body=$(jq -r 'map("- **\(.title)** — [\(.id)](\(.url))") | join("\n")' created.json)
+        gh pr comment "$PR_NUMBER" --repo "$REPO" --body $'## Created Lark workflows\n\n'"$body"
+        gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+          -H "Accept: application/vnd.github+json" \
+          -f content=+1 >/dev/null || true
+
+    - name: Mark failure on error
+      if: failure() && steps.proceed.outputs.go == 'true' && steps.check-anthropic-key.outputs.skip != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ steps.pr.outputs.number }}
+        REPO: ${{ github.repository }}
+        MODE: ${{ steps.pr.outputs.mode }}
+        COMMENT_ID: ${{ github.event.comment.id }}
         LARK_PROPOSING_LABEL: lark:proposing-tests
         LARK_FAILED_LABEL: lark:test-proposal-failed
       run: |
-        gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$LARK_PROPOSING_LABEL" --add-label "$LARK_FAILED_LABEL" || true
+        if [ "$MODE" = "propose" ]; then
+          gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$LARK_PROPOSING_LABEL" --add-label "$LARK_FAILED_LABEL" || true
+        elif [ "$MODE" = "create" ] && [ -n "$COMMENT_ID" ]; then
+          gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+            -H "Accept: application/vnd.github+json" \
+            -f content=-1 >/dev/null || true
+        fi
