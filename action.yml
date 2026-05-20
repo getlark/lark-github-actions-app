@@ -134,6 +134,7 @@ runs:
         fi
 
     - name: Run Claude Code to propose tests
+      id: claude
       if: steps.check-anthropic-key.outputs.skip != 'true'
       uses: anthropics/claude-code-action@v1
       with:
@@ -145,7 +146,9 @@ runs:
         # GitHub App on every repo would be a significant adoption hurdle.
         github_token: ${{ github.token }}
         claude_args: |
-          --max-turns 20
+          --max-turns 60
+          --model sonnet
+        show_full_output: ${{ runner.debug == '1' }}
         prompt: |
           You are running inside a GitHub Action to suggest end-to-end tests
           for a customer's pull request. Read the diff in this checkout
@@ -188,12 +191,13 @@ runs:
         # the PR as having proposals.
         if [ ! -s proposals.json ] || ! jq -e 'type == "array" and length > 0' proposals.json >/dev/null 2>&1; then
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body $'Lark did not find new behavior worth covering with an end-to-end test in this PR.'
+          gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$LARK_PROPOSING_LABEL" || true
         else
           marker=$(printf '<!-- lark-test-proposals: %s -->' "$(cat proposals.json)")
           body=$(jq -r 'to_entries | map("**\(.key + 1).** \(.value.title)\n\n\(.value.description)") | join("\n\n---\n\n")' proposals.json)
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$marker"$'\n\n## Proposed Lark tests\n\n'"$body"$'\n\nReply with `/create-workflows` to materialize all, or `/create-workflows 1 3` to pick specific proposals.'
+          gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$LARK_PROPOSING_LABEL" --add-label "$LARK_PROPOSED_LABEL" || true
         fi
-        gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$LARK_PROPOSING_LABEL" --add-label "$LARK_PROPOSED_LABEL" || true
 
     - name: Mark failure on error
       if: failure() && steps.check-anthropic-key.outputs.skip != 'true'
