@@ -148,6 +148,7 @@ runs:
         claude_args: |
           --max-turns 60
           --model sonnet
+          --permission-mode acceptEdits
         show_full_output: ${{ runner.debug == '1' }}
         prompt: |
           You are running inside a GitHub Action to suggest end-to-end tests
