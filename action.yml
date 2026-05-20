@@ -116,22 +116,23 @@ runs:
           -s create-workflow \
           -y
 
-    - name: Fetch existing Lark workflows
+    - name: Write Lark MCP config
       if: steps.check-anthropic-key.outputs.skip != 'true'
       shell: bash
       env:
         LARK_TOKEN: ${{ steps.exchange.outputs.lark_token }}
         LARK_API_BASE_URL: ${{ inputs.lark-api-base-url }}
+        MCP_CONFIG_PATH: ${{ runner.temp }}/lark-mcp.json
       run: |
-        # --fail makes curl exit non-zero on HTTP 4xx/5xx instead of writing
-        # the error body to existing-workflows.json (which Claude Code would
-        # then read as workflow data).
-        if ! curl -sS --fail "$LARK_API_BASE_URL/workflows" \
-            -H "Authorization: Bearer $LARK_TOKEN" \
-            -o existing-workflows.json; then
-          echo "Failed to fetch existing Lark workflows from $LARK_API_BASE_URL/workflows"
-          exit 1
-        fi
+        # Build the MCP config with jq -n so the bearer is never interpolated
+        # into a heredoc / shell history. The file lives under runner.temp
+        # (cleaned up by the runner) rather than the checkout to keep the
+        # token out of any artifact that might surface workspace files.
+        jq -n \
+          --arg url "$LARK_API_BASE_URL/mcp" \
+          --arg auth "Bearer $LARK_TOKEN" \
+          '{mcpServers: {lark: {type: "http", url: $url, headers: {Authorization: $auth}}}}' \
+          > "$MCP_CONFIG_PATH"
 
     - name: Run Claude Code to propose tests
       id: claude
@@ -149,13 +150,26 @@ runs:
           --max-turns 60
           --model sonnet
           --permission-mode acceptEdits
+          --mcp-config ${{ runner.temp }}/lark-mcp.json
+          --allowedTools "mcp__lark__list_workflows,mcp__lark__retrieve_workflow,mcp__lark__list_workflow_groups,mcp__lark__list_workflow_executions,mcp__lark__retrieve_workflow_execution,mcp__lark__get_execution_logs,mcp__lark__list_workflow_generations,mcp__lark__retrieve_workflow_generation,mcp__lark__get_generation_workflow_logs,mcp__lark__list_workflow_repairs,mcp__lark__retrieve_workflow_repair,mcp__lark__get_repair_workflow_logs,mcp__lark__list_workflow_summarizations,mcp__lark__retrieve_workflow_summarization,mcp__lark__get_summarization_workflow_logs,mcp__lark__list_secret_contexts,mcp__lark__get_secret_context"
         show_full_output: ${{ runner.debug == '1' }}
         prompt: |
           You are running inside a GitHub Action to suggest end-to-end tests
           for a customer's pull request. Read the diff in this checkout
           (use `git diff origin/${{ github.event.pull_request.base.ref }}...HEAD`),
-          read the existing tests in `existing-workflows.json`, and propose
-          net-new tests that exercise behavior introduced by the diff.
+          inspect the customer's existing Lark workflows via the `lark` MCP
+          server, and propose net-new tests that exercise behavior introduced
+          by the diff.
+
+          Discover existing coverage with the `lark` MCP tools rather than
+          listing everything blindly. Start with `mcp__lark__list_workflows`
+          and pass the `search` query with terms drawn from the diff (file
+          names, route paths, function or component names) to surface
+          near-duplicates. Use `mcp__lark__retrieve_workflow` to inspect a
+          candidate's `target` and `steps` before deciding it duplicates the
+          diff's behavior. Optionally call `mcp__lark__list_workflow_groups`
+          to see how tests are organized, and `mcp__lark__list_secret_contexts`
+          if a proposed test would require credentials.
 
           Follow the guidance in the `create-workflow` skill at
           `.claude/skills/create-workflow/SKILL.md` when shaping each
