@@ -61,8 +61,15 @@ runs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         REPO: ${{ github.repository }}
         LARK_PROPOSING_LABEL: lark:proposing-tests
+        LARK_PROPOSED_LABEL: lark:tests-proposed
+        LARK_FAILED_LABEL: lark:test-proposal-failed
       run: |
-        gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "$LARK_PROPOSING_LABEL" || true
+        # Strip terminal labels from any prior run so the PR reflects only
+        # this run's state. `gh pr edit` accepts a single comma-separated
+        # --remove-label flag.
+        gh pr edit "$PR_NUMBER" --repo "$REPO" \
+          --remove-label "$LARK_PROPOSED_LABEL,$LARK_FAILED_LABEL" \
+          --add-label "$LARK_PROPOSING_LABEL" || true
 
     - name: Checkout PR head
       if: steps.check-anthropic-key.outputs.skip != 'true'
