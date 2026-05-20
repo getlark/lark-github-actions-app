@@ -10,6 +10,10 @@ inputs:
     description: Base URL for the Lark API. Override to point at staging; production customers should leave the default.
     required: false
     default: https://api.getlark.ai
+  claude-model:
+    description: Claude model passed to claude-code-action via --model. Defaults to sonnet; override to e.g. opus for higher-fidelity proposals.
+    required: false
+    default: sonnet
 
 runs:
   using: composite
@@ -278,15 +282,6 @@ runs:
         echo "::add-mask::$lark_token"
         echo "lark_token=$lark_token" >> "$GITHUB_OUTPUT"
 
-    - name: Install Lark skills for Claude Code
-      if: steps.proceed.outputs.go == 'true' && steps.check-anthropic-key.outputs.skip != 'true' && (steps.pr.outputs.mode == 'propose' || steps.proposals.outputs.found == 'true')
-      shell: bash
-      run: |
-        npx -y skills@latest add getlark/skills \
-          -a claude-code \
-          -s create-workflow \
-          -y
-
     - name: Write Lark MCP config
       if: steps.proceed.outputs.go == 'true' && steps.check-anthropic-key.outputs.skip != 'true' && (steps.pr.outputs.mode == 'propose' || steps.proposals.outputs.found == 'true')
       shell: bash
@@ -319,7 +314,7 @@ runs:
         github_token: ${{ github.token }}
         claude_args: |
           --max-turns 60
-          --model sonnet
+          --model ${{ inputs.claude-model }}
           --permission-mode acceptEdits
           --mcp-config ${{ runner.temp }}/lark-mcp.json
           --allowedTools "mcp__lark__list_workflows,mcp__lark__retrieve_workflow,mcp__lark__list_workflow_groups,mcp__lark__list_workflow_executions,mcp__lark__retrieve_workflow_execution,mcp__lark__get_execution_logs,mcp__lark__list_workflow_generations,mcp__lark__retrieve_workflow_generation,mcp__lark__get_generation_workflow_logs,mcp__lark__list_workflow_repairs,mcp__lark__retrieve_workflow_repair,mcp__lark__get_repair_workflow_logs,mcp__lark__list_workflow_summarizations,mcp__lark__retrieve_workflow_summarization,mcp__lark__get_summarization_workflow_logs,mcp__lark__list_secret_contexts,mcp__lark__get_secret_context"
@@ -342,12 +337,10 @@ runs:
           to see how tests are organized, and `mcp__lark__list_secret_contexts`
           if a proposed test would require credentials.
 
-          Follow the guidance in the `create-workflow` skill at
-          `.claude/skills/create-workflow/SKILL.md` when shaping each
-          proposal's `target` and `steps`. Every proposal needs a concrete
-          target (URL, API endpoint, CLI binary, script path, etc.) plus
-          ordered action steps in plain prose. Do not pad thin diffs with
-          invented steps — return fewer, sharper proposals.
+          Every proposal needs a concrete target (URL, API endpoint, CLI
+          binary, script path, etc.) plus ordered action steps in plain
+          prose. Do not pad thin diffs with invented steps — return fewer,
+          sharper proposals.
 
           Output a JSON array of `{title, description, target, steps}` to
           `proposals.json` in the workspace root. Do not propose tests that
@@ -370,7 +363,7 @@ runs:
         github_token: ${{ github.token }}
         claude_args: |
           --max-turns 60
-          --model sonnet
+          --model ${{ inputs.claude-model }}
           --permission-mode acceptEdits
           --mcp-config ${{ runner.temp }}/lark-mcp.json
           --allowedTools "mcp__lark__create_workflow,mcp__lark__list_workflow_groups,mcp__lark__list_secret_contexts,mcp__lark__get_secret_context"
@@ -388,9 +381,7 @@ runs:
           the file.
 
           For each proposal, call `mcp__lark__create_workflow` to create
-          the workflow on Lark. Follow the guidance in the `create-workflow`
-          skill at `.claude/skills/create-workflow/SKILL.md` for shaping
-          the request — but use the MCP tool, not the `getlark` CLI.
+          the workflow on Lark.
 
           - Use the proposal's `title` as the workflow `name`.
           - Build the workflow `description` by concatenating the proposal's
@@ -424,7 +415,8 @@ runs:
         # and a cosmetic misfire shouldn't post a broken comment or mislabel
         # the PR as having proposals.
         if [ ! -s proposals.json ] || ! jq -e 'type == "array" and length > 0' proposals.json >/dev/null 2>&1; then
-          gh pr comment "$PR_NUMBER" --repo "$REPO" --body $'Lark did not find new behavior worth covering with an end-to-end test in this PR.'
+          # Stay silent when there's nothing worth proposing — a "no proposals"
+          # comment on every quiet PR is noise. Just clear the in-progress label.
           gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$LARK_PROPOSING_LABEL" || true
         else
           marker=$(printf '<!-- lark-test-proposals: %s -->' "$(jq -c . proposals.json)")

@@ -49,6 +49,7 @@ jobs:
 | --- | --- | --- | --- |
 | `anthropic-api-key` | yes | — | Anthropic API key used by `claude-code-action` to draft proposals. Pass via `${{ secrets.ANTHROPIC_API_KEY }}` so GitHub masks it in logs. |
 | `lark-api-base-url` | no | `https://api.getlark.ai` | Override to point at staging. Production customers should leave the default. |
+| `claude-model` | no | `sonnet` | Claude model passed to `claude-code-action` via `--model`. Override to e.g. `opus` for higher-fidelity proposals. |
 
 ## Required workflow permissions
 
