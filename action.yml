@@ -427,7 +427,7 @@ runs:
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body $'Lark did not find new behavior worth covering with an end-to-end test in this PR.'
           gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$LARK_PROPOSING_LABEL" || true
         else
-          marker=$(printf '<!-- lark-test-proposals: %s -->' "$(cat proposals.json)")
+          marker=$(printf '<!-- lark-test-proposals: %s -->' "$(jq -c . proposals.json)")
           body=$(jq -r 'to_entries | map("**\(.key + 1).** \(.value.title)\n\n\(.value.description)") | join("\n\n---\n\n")' proposals.json)
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$marker"$'\n\n## Proposed Lark tests\n\n'"$body"$'\n\nReply with `/create-workflows` to materialize all, or `/create-workflows 1 3` to pick specific proposals.'
           gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "$LARK_PROPOSING_LABEL" --add-label "$LARK_PROPOSED_LABEL" || true
