@@ -2,6 +2,8 @@
 
 GitHub composite action that proposes end-to-end [Lark](https://getlark.ai) tests for each pull request diff. Drop it into a workflow and Lark will draft `proposals.json` suggestions, post them as a PR comment, and label the PR with its status.
 
+Under the hood, Claude Code reads the diff and discovers your existing coverage by calling the [Lark MCP server](https://docs.getlark.ai/mcp-quickstart) (read-only) — searching workflows by name and inspecting their steps before proposing anything new.
+
 ## Usage
 
 ```yaml
