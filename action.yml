@@ -342,6 +342,28 @@ runs:
           prose. Do not pad thin diffs with invented steps — return fewer,
           sharper proposals.
 
+          The target can be any software surface — web/mobile UI, HTTP
+          or GraphQL API, CLI binary, shell script, data pipeline,
+          background job, or a mixed flow that spans several. Pick the
+          surface where the diff's effect is directly observable from
+          outside the system under test: rendered UI state, response
+          payload or status, files written, queue or DB rows produced,
+          stdout, exit code, etc. If the diff's effect is only visible
+          on an internal hop the chosen target cannot see — a
+          server-to-server header, an internal log line or metric, a
+          private method's behavior — drop the proposal. Lark proposes
+          tests, not smoke checks.
+
+          Every proposal must include at least one assertion that would
+          produce a different result with the diff applied vs reverted,
+          and state it explicitly in the steps. The assertion must be
+          unconditional — "do X, then verify Y" — not "if Y appears,
+          check it." This applies regardless of surface: a UI test
+          asserts a specific rendered element or state, a CLI test
+          asserts specific stdout or exit code, a pipeline test asserts
+          specific output rows or files. If you cannot articulate such
+          an assertion from the chosen target, skip the proposal.
+
           Output a JSON array of `{title, description, target, steps}` to
           `proposals.json` in the workspace root. Do not propose tests that
           duplicate existing workflows.
